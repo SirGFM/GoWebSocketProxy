@@ -17,3 +17,4 @@ running on different devices.
 * Add tests and examples
 * Make the application conformant with [RFC 6455](https://tools.ietf.org/html/rfc6455)
 * Allow communication between arbitrary numbers of clients
+* Allow authentication over HTTPS
