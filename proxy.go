@@ -3,6 +3,7 @@ package main
 
 import (
     "fmt"
+    "github.com/SirGFM/GoWebSocketProxy/proxy"
     "net"
     "sync"
     "time"
@@ -12,6 +13,9 @@ const viewUri = "/view"
 const ctrlUri = "/control"
 const timeout = time.Second * 10
 var uriLock = sync.Mutex{}
+
+var a = make(chan []byte, 1)
+var b = make(chan []byte, 1)
 
 var validUris map[string]bool = map[string]bool {
     viewUri: true,
@@ -52,8 +56,10 @@ func wsServer(conn net.Conn, stop *bool, proxyConn chan []byte) {
     }()
 
     if uri == viewUri {
-        view(conn, stop, proxyConn)
+        p := proxy.Setup(conn, stop, a, b, time.Second * 10)
+        p.Run()
     } else if uri == ctrlUri {
-        control(conn, stop, proxyConn)
+        p := proxy.Setup(conn, stop, b, a, time.Second * 10)
+        p.Run()
     }
 }
