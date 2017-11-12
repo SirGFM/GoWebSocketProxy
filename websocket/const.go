@@ -51,3 +51,6 @@ const (
     Pong            Opcode = 0xA
     // 0xB...0xF: reserved for further control frames
 )
+
+// Default message to be used for heart-beats.
+var HeartBeatMessage = []byte{0x80 | byte(Pong), 0x00}

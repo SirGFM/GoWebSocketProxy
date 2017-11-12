@@ -9,6 +9,8 @@ import (
     "time"
 )
 
+const heartBeatFrequency = time.Second * 10
+
 type proxy struct {
     // The connection with the end-point.
     conn net.Conn
@@ -22,6 +24,8 @@ type proxy struct {
     stop *bool
     // Buffer used to receive messages from the connection.
     buf  []byte
+    // Time to send the next heart beat
+    heartBeatTime time.Time
     // Timeout for receiving messages
     timeout time.Duration
     // If a connection closed was send but there was no response from the other
@@ -149,6 +153,8 @@ func (p *proxy) Run() {
     p.buf = make([]byte, websocket.MinHeaderLength)
 
     for !*p.stop {
+        var err error
+
         p.waitForMessage()
 
         // Instead of the usual time.After for avoiding running indefinitely,
@@ -159,8 +165,15 @@ func (p *proxy) Run() {
             // Nothing received within the expected time slice
         case msg := <- p.recv:
             // Received a message from another proxy. Send it to our end-point.
-            p.conn.Write(msg)
-        case err := <-p.connSelect:
+            p.conn.SetWriteDeadline(time.Now().Add(p.timeout))
+            _, err = p.conn.Write(msg)
+            err = checkConnectionError(err)
+            if err != nil {
+                // Failed to send data to our end-point.
+                // TODO Do something.
+                return
+            }
+        case err = <-p.connSelect:
             // If no error was detected, process the message. This allows
             // checking the error only once (regardless if from the channel or
             // the connection).
@@ -181,6 +194,18 @@ func (p *proxy) Run() {
             p.connSelect = nil
         }
 
-        // TODO Heartbeat (i.e., PONG)
+        // From time to time, send a 'Pong' message to check that the connection
+        // is alive.
+        if now := time.Now(); now.After(p.heartBeatTime) {
+            p.conn.SetWriteDeadline(time.Now().Add(p.timeout))
+            _, err = p.conn.Write(websocket.HeartBeatMessage)
+            err = checkConnectionError(err)
+            if err != nil {
+                // TODO Do something.
+                return
+            }
+
+            p.heartBeatTime = now.Add(heartBeatFrequency)
+        }
     }
 }
