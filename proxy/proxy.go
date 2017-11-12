@@ -24,6 +24,9 @@ type proxy struct {
     buf  []byte
     // Timeout for receiving messages
     timeout time.Duration
+    // If a connection closed was send but there was no response from the other
+    // end-point yet.
+    closed bool
 }
 
 // Signals that the asynchronous conn.Read timed out
@@ -96,7 +99,42 @@ func (p *proxy) processMessage() (err error) {
         return connectionClosed
     }
 
-    // TODO Check whether the Frame was actually directed at this proxy (e.g., Ping/Pong)
+    switch websocket.Opcode(p.buf[websocket.OpcodeIndex] & websocket.OpcodeMask) {
+    case websocket.ConnectionClose:
+        // 5.5.1 of RFC 6455 defines that when a 'ConnectionClose' is
+        // received, the end-point must reply as soon as possible with its
+        // own 'ConnectionClose'.
+        if !p.closed {
+            // The end-point started the closing procedure. In order to reply
+            // and close the connection more easily, send the response and
+            // return connectionClosed.
+            p.conn.Write(p.buf[:offset+msgLen])
+        }
+        // The end-point replied to our 'ConnectionClose'. Simply exit.
+        return connectionClosed
+    case websocket.Ping:
+        // 5.5.2 and 5.5.3 of RFC 6455 defines that a Ping request must be
+        // answered with a Pong response. If it contained any
+        // 'Payload Data', the same data must be sent on the response.
+        //
+        // Therefore, simply change the operation to 'Pong' and move on.
+        p.buf[websocket.OpcodeIndex] &^= websocket.OpcodeMask
+        p.buf[websocket.OpcodeIndex] |= byte(websocket.Pong)
+    case websocket.Pong:
+        // 5.5.3 of RFC 6455 defines that unsolicited 'Pong' requests acts as
+        // heart-beat for the connection and no response is expected.
+
+        // TODO Check if a 'Pong' was expected and clear that flag.
+    }
+
+    // If the connection was closed by this end-point, it must send a
+    // 'ConnectionClose'. Ignore any other messages.
+    if p.closed {
+        return
+    }
+
+    // TODO Check if the message was a custom command.
+
     p.send <- p.buf[:offset+msgLen]
 
     return nil
