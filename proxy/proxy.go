@@ -88,9 +88,12 @@ func (p *proxy) processMessage() (err error) {
     var msgLen, offset int
 
     p.buf, msgLen, offset, err = websocket.ReceiveFrame(p.conn, p.buf)
-    if err != nil {
-        // TODO Check if EOF?
-        return
+    if netErr, ok := err.(*net.OpError); ok && netErr != nil &&
+        netErr.Err == net.ErrWriteToConnected {
+
+        return receiveTimedOut
+    } else if err == io.EOF {
+        return connectionClosed
     }
 
     // TODO Check whether the Frame was actually directed at this proxy (e.g., Ping/Pong)
@@ -117,6 +120,13 @@ func (p *proxy) Run() {
             // Received a message from another proxy. Send it to our end-point.
             p.conn.Write(msg)
         case err := <-p.connSelect:
+            // If no error was detected, process the message. This allows
+            // checking the error only once (regardless if from the channel or
+            // the connection).
+            if err == nil {
+                err = p.processMessage()
+            }
+
             if err == connectionClosed {
                 // End-point was closed, nothing left to do here.
                 return
