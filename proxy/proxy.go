@@ -51,21 +51,27 @@ func Setup(conn net.Conn, stop *bool, send chan []byte, recv chan []byte,
     }
 }
 
+// checkConnectionError converts the various possible connection errors to the
+// pre-defined ones.
+func checkConnectionError(err error) error {
+    if netErr, ok := err.(*net.OpError); ok && netErr != nil &&
+        netErr.Err == net.ErrWriteToConnected {
+
+        return receiveTimedOut
+    } else if err == io.EOF {
+        return connectionClosed
+    } else {
+        return err
+    }
+}
+
 // goWaitForMessage is the goroutine called on waitForMessage. See that
 // function's documentation for details.
 func (p *proxy) goWaitForMessage() {
     p.conn.SetReadDeadline(time.Now().Add(p.timeout))
 
     _, err := p.conn.Read(p.buf[:websocket.MinHeaderLength])
-    if netErr, ok := err.(*net.OpError); ok && netErr != nil &&
-        netErr.Err == net.ErrWriteToConnected {
-
-        p.connSelect <- receiveTimedOut
-    } else if err == io.EOF {
-        p.connSelect <- connectionClosed
-    } else {
-        p.connSelect <- err
-    }
+    p.connSelect <- checkConnectionError(err)
 }
 
 // waitForMessage, sent from conn, and report the result on p.connSelect. The
@@ -91,12 +97,9 @@ func (p *proxy) processMessage() (err error) {
     var msgLen, offset int
 
     p.buf, msgLen, offset, err = websocket.ReceiveFrame(p.conn, p.buf)
-    if netErr, ok := err.(*net.OpError); ok && netErr != nil &&
-        netErr.Err == net.ErrWriteToConnected {
-
-        return receiveTimedOut
-    } else if err == io.EOF {
-        return connectionClosed
+    err = checkConnectionError(err)
+    if err != nil {
+        return err
     }
 
     switch websocket.Opcode(p.buf[websocket.OpcodeIndex] & websocket.OpcodeMask) {
