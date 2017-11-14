@@ -2,14 +2,12 @@
 package proxy
 
 import (
-    "github.com/pkg/errors"
+    "bytes"
     "github.com/SirGFM/GoWebSocketProxy/websocket"
     "io"
     "net"
     "time"
 )
-
-const heartBeatFrequency = time.Second * 10
 
 type proxy struct {
     // The connection with the end-point.
@@ -32,12 +30,6 @@ type proxy struct {
     // end-point yet.
     closed bool
 }
-
-// Signals that the asynchronous conn.Read timed out
-var receiveTimedOut = errors.New(
-    "Timed out waiting for the first few bytes of a message")
-// Signals that the connection to the end-point was closed.
-var connectionClosed = errors.New("Connection closed")
 
 // Setup a new proxy that communicates with conn. It redirects messages received
 // from conn into send and sends messages received from recv into conn. When
@@ -140,7 +132,13 @@ func (p *proxy) processMessage() (err error) {
         return
     }
 
-    // TODO Check if the message was a custom command.
+    // If the message starts with some specific bytes, it's interpreted as a
+    // command for the server.
+    if bytes.HasPrefix(p.buf[offset:offset+msgLen], proxyCommandID) {
+        exec(p.buf[offset+len(proxyCommandID):offset+msgLen])
+
+        return nil
+    }
 
     p.send <- p.buf[:offset+msgLen]
 
