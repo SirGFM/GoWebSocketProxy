@@ -94,7 +94,7 @@ func handshake(conn net.Conn, validUris map[string]bool) (
     }
 
     // 4. Check for a |Connection| header == "Upgrade"
-    if want, got := "Upgrade", req.Header.Get("Connection"); want != got {
+    if want, got := "Upgrade", req.Header.Get("Connection"); !strings.Contains(got, want) {
         retErr = errors.New(fmt.Sprintf(
             "Invalid |Connection| header field: wanted '%s', got '%s'\n",
             want, got))
