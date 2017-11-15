@@ -2,7 +2,6 @@
 package proxy
 
 import (
-    "bytes"
     "github.com/SirGFM/GoWebSocketProxy/websocket"
     "io"
     "net"
@@ -130,14 +129,6 @@ func (p *proxy) processMessage() (err error) {
     // 'ConnectionClose'. Ignore any other messages.
     if p.closed {
         return
-    }
-
-    // If the message starts with some specific bytes, it's interpreted as a
-    // command for the server.
-    if bytes.HasPrefix(p.buf[offset:offset+msgLen], proxyCommandID) {
-        exec(p.buf[offset+len(proxyCommandID):offset+msgLen])
-
-        return nil
     }
 
     p.send <- p.buf[:offset+msgLen]
