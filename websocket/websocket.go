@@ -29,7 +29,7 @@ func readFullLength(conn net.Conn, buf []byte, length int) (retBuf []byte,
     retBuf = expandBuffer(buf, MinHeaderLength+length)
 
     conn.SetReadDeadline(time.Now().Add(time.Second))
-    n, err = conn.Read(retBuf[MinHeaderLength:length])
+    n, err = conn.Read(retBuf[MinHeaderLength:MinHeaderLength+length])
     if err != nil {
         return
     } else if n != length {

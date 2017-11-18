@@ -176,8 +176,6 @@ func (p *proxy) Run() {
             } else if err == receiveTimedOut {
                 // Receive timed out, ignore the error and continue.
                 err = nil
-            } else if err == nil {
-                err = p.processMessage()
             }
 
             p.connSelect = nil
