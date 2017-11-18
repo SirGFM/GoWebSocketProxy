@@ -131,7 +131,11 @@ func (p *proxy) processMessage() (err error) {
         return
     }
 
-    p.send <- p.buf[:offset+msgLen]
+    // Ensure that a safe buffer is used...
+    b := make([]byte, offset+msgLen)
+    copy(b, p.buf[:offset+msgLen])
+
+    p.send <- b
 
     return nil
 }
