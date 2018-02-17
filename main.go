@@ -2,7 +2,7 @@ package main
 
 import (
     "fmt"
-    "github.com/SirGFM/GoWebSocketProxy/newWebsocket"
+    "github.com/SirGFM/GoWebSocketProxy/websocket"
     "os"
     "os/signal"
 )
@@ -19,7 +19,7 @@ func (*myServer) Do(msg []byte, offset int) error {
     return nil
 }
 
-func quitCleanup(c chan os.Signal, ctx *newWebsocket.Context) {
+func quitCleanup(c chan os.Signal, ctx *websocket.Context) {
     _ = <-c
 
     ctx.Close()
@@ -28,7 +28,7 @@ func quitCleanup(c chan os.Signal, ctx *newWebsocket.Context) {
 func main() {
     var signalTrap chan os.Signal
 
-    ctx := newWebsocket.NewContext("", "/proxy", 60000, 2)
+    ctx := websocket.NewContext("", "/proxy", 60000, 2)
     defer ctx.Close()
 
     signalTrap = make(chan os.Signal, 1)

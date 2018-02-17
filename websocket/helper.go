@@ -1,4 +1,4 @@
-package newWebsocket
+package websocket
 
 import (
     "encoding/binary"
