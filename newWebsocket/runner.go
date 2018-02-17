@@ -1,12 +1,15 @@
 package newWebsocket
 
 import (
+    "github.com/pkg/errors"
     "io"
     "net"
     "time"
 )
 
 const defaultTimeout = time.Second * 10
+// How long between 'Pong' are sent
+var heartBeatFrequency = time.Second * 10
 
 type runner struct {
     // The server that do stuff when it receives a message.
@@ -16,7 +19,7 @@ type runner struct {
     // Signals the status of the last attempt to receive from conn.
     connSelect chan error
     // Signal from the main thread that this runner should exit.
-    stop *bool
+    running *bool
     // Buffer used to receive messages from the connection.
     buf []byte
     // Time to send the next heart beat
@@ -28,15 +31,16 @@ type runner struct {
     closed bool
 }
 
-// Setup a new runner that communicates with conn. When stop is set to true (and
-// after timeout), the runner stops, as the caller should close the channel.
-func setupRunner(conn net.Conn, stop *bool, server Server,
+// Setup a new runner that communicates with conn. When running is set to false
+// (and after timeouts), the runner stops, as the caller should close the
+// channel.
+func setupRunner(conn net.Conn, running *bool, server Server,
     timeout time.Duration) (r *runner, err error) {
 
     r = &runner {
         server:  server,
         conn:    conn,
-        stop:    stop,
+        running: running,
         timeout: timeout,
     }
     r.buf = make([]byte, MinHeaderLength)
@@ -141,16 +145,14 @@ func (r *runner) processMessage() (err error) {
     b := make([]byte, offset+msgLen)
     copy(b, r.buf[:offset+msgLen])
 
-    err = server.Do(b)
+    err = r.server.Do(b, offset)
 
     return
 }
 
 // Run handles the connection the end-point.
-func (r *runner) Run() {
-    for !*r.stop {
-        var err error
-
+func (r *runner) Run() (err error) {
+    for *r.running {
         r.waitForMessage()
 
         // Instead of the usual time.After for avoiding running indefinitely,
@@ -202,4 +204,7 @@ func (r *runner) Run() {
             r.heartBeatTime = now.Add(heartBeatFrequency)
         }
     }
+
+    err = nil
+    return
 }

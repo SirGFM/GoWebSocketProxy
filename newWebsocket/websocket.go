@@ -10,8 +10,9 @@ import (
 type Server interface {
     // Set anythin up required by the server's connection to a client.
     Setup() error
-    // Do something with the received message.
-    Do(msg []byte) error
+    // Do something with the received message. Offset points to the actual
+    // payload within the WebSocket frame.
+    Do(msg []byte, offset int) error
 }
 
 type Context struct {
@@ -61,6 +62,8 @@ func (ctx *Context) Close() {
 
 // Set everything up so the conectext may accept connections.
 func (ctx *Context) Setup(server Server) error {
+    var err error
+
     if ctx.Port <= 0 {
         return errors.New("websocket: Invalid port")
     }
@@ -93,6 +96,7 @@ func (ctx *Context) Run(cerr chan error) {
         return
     }
 
+    ctx.running = true
     for ctx.running {
         conn, err := ctx.ln.Accept()
         if err != nil {
@@ -144,7 +148,7 @@ func (ctx *Context) serve(conn net.Conn, cerr chan error) {
     } (ctx)
 
     // Runs until any error happens
-    r, err := setupRunner(conn, &ctx.stop, ctx.server, defaultTimeout)
+    r, err := setupRunner(conn, &ctx.running, ctx.server, defaultTimeout)
     if err != nil {
         sendError(cerr, err)
         return

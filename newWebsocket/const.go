@@ -4,8 +4,6 @@ import (
     "errors"
 )
 
-// How long between 'Pong' are sent
-const heartBeatFrequency = time.Second * 10
 // Signals that the asynchronous conn.Read timed out
 var receiveTimedOut = errors.New(
     "websocket: Timed out waiting for the first few bytes of a message")

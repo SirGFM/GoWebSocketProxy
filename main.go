@@ -1,58 +1,54 @@
-
 package main
 
 import (
-    //"bytes"
     "fmt"
-    "net"
+    "github.com/SirGFM/GoWebSocketProxy/newWebsocket"
     "os"
     "os/signal"
 )
 
-func quitCleanup(c chan os.Signal, stop *bool, tcpListener *net.Listener) {
+type myServer struct{}
+
+// Set anythin up required by the server's connection to a client.
+func (*myServer) Setup() error { return nil }
+
+// Do something with the received message.
+func (*myServer) Do(msg []byte, offset int) error {
+    msg = msg[offset:]
+    fmt.Printf("Got message %#x (\"%s\")\n", msg, string(msg))
+    return nil
+}
+
+func quitCleanup(c chan os.Signal, ctx *newWebsocket.Context) {
     _ = <-c
 
-    *stop = true
-    if *tcpListener != nil {
-        (*tcpListener).Close()
-    }
+    ctx.Close()
 }
 
 func main() {
-    var ln net.Listener
     var signalTrap chan os.Signal
-    var proxyConn chan []byte
-    var err error
-    var port int
-    var stop bool
 
-    port = 60000
+    ctx := newWebsocket.NewContext("", "/proxy", 60000, 2)
+    defer ctx.Close()
 
     signalTrap = make(chan os.Signal, 1)
-    go quitCleanup(signalTrap, &stop, &ln)
-
+    go quitCleanup(signalTrap, ctx)
     signal.Notify(signalTrap, os.Interrupt)
 
-    ln, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
+    err := ctx.Setup(&myServer{})
     if err != nil {
-        panic(err)
+        panic(err.Error())
     }
-    defer func() {
-        if ln != nil {
-            ln.Close()
-        }
-        ln = nil
-    }()
 
-    proxyConn = make(chan []byte, 1)
+    cerr := make(chan error)
+    go ctx.Run(cerr)
 
-    fmt.Println("Waiting...")
-    for !stop {
-        conn, err := ln.Accept()
-        if err != nil {
-            fmt.Printf("Failed to accept conn: %+v\n", err)
-            continue
+    for {
+        err = <-cerr
+        if err == nil {
+            break
         }
-        go wsServer(conn, &stop, proxyConn)
+
+        fmt.Printf("Got error from server: %+v\n", err)
     }
 }
