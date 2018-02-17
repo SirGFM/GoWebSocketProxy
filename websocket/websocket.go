@@ -8,8 +8,8 @@ import (
 )
 
 type Server interface {
-    // Set anythin up required by the server's connection to a client.
-    Setup() error
+    // Returns a new instance of this server, passed to the runner.
+    Clone(conn net.Conn) (Server, error)
     // Do something with the received message. Offset points to the actual
     // payload within the WebSocket frame.
     Do(msg []byte, offset int) error
@@ -28,7 +28,7 @@ type Context struct {
     MaximumConnections int
 
     // Server that does something with the received messages.
-    server Server
+    serverTempl Server
     // Connection listener.
     ln net.Listener
     // Synchronizes access to connectionCounter.
@@ -56,12 +56,12 @@ func (ctx *Context) Close() {
     if ctx.ln != nil {
         ctx.ln.Close()
         ctx.ln = nil
-        ctx.server = nil
+        ctx.serverTempl = nil
     }
 }
 
 // Set everything up so the conectext may accept connections.
-func (ctx *Context) Setup(server Server) error {
+func (ctx *Context) Setup(serverTempl Server) error {
     var err error
 
     if ctx.Port <= 0 {
@@ -73,7 +73,7 @@ func (ctx *Context) Setup(server Server) error {
         return errors.Wrap(err, "websocket: Failed to listen to address")
     }
 
-    ctx.server = server
+    ctx.serverTempl = serverTempl
 
     return nil
 }
@@ -91,7 +91,7 @@ func sendError(cerr chan error, err error) {
 //
 // The server signals that it has exited by sending a nil error to the channel.
 func (ctx *Context) Run(cerr chan error) {
-    if ctx.ln == nil || ctx.server == nil {
+    if ctx.ln == nil || ctx.serverTempl == nil {
         sendError(cerr, errors.New("websocket: Setup hasn't been configured yet"))
         return
     }
@@ -147,8 +147,15 @@ func (ctx *Context) serve(conn net.Conn, cerr chan error) {
         ictx.counterMutex.Unlock()
     } (ctx)
 
+    // Clone the server (if needed)
+    server, err := ctx.serverTempl.Clone(conn)
+    if err != nil {
+        sendError(cerr, err)
+        return
+    }
+
     // Runs until any error happens
-    r, err := setupRunner(conn, &ctx.running, ctx.server, defaultTimeout)
+    r, err := setupRunner(conn, &ctx.running, server, defaultTimeout)
     if err != nil {
         sendError(cerr, err)
         return

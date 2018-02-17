@@ -3,14 +3,17 @@ package main
 import (
     "fmt"
     "github.com/SirGFM/GoWebSocketProxy/websocket"
+    "net"
     "os"
     "os/signal"
 )
 
 type myServer struct{}
 
-// Set anythin up required by the server's connection to a client.
-func (*myServer) Setup() error { return nil }
+// No need to clone this, as nothing is stored
+func (m *myServer) Clone(conn net.Conn) (websocket.Server, error) {
+    return m, nil
+}
 
 // Do something with the received message.
 func (*myServer) Do(msg []byte, offset int) error {

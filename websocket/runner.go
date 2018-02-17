@@ -22,9 +22,9 @@ type runner struct {
     running *bool
     // Buffer used to receive messages from the connection.
     buf []byte
-    // Time to send the next heart beat
+    // Time to send the next heart beat.
     heartBeatTime time.Time
-    // Timeout for receiving messages
+    // Timeout for receiving messages.
     timeout time.Duration
     // If a connection closed was send but there was no response from the other
     // end-point yet.
@@ -44,8 +44,6 @@ func setupRunner(conn net.Conn, running *bool, server Server,
         timeout: timeout,
     }
     r.buf = make([]byte, MinHeaderLength)
-
-    err = server.Setup()
 
     return
 }
