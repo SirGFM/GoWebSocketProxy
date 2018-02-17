@@ -13,6 +13,8 @@ type Server interface {
     // Do something with the received message. Offset points to the actual
     // payload within the WebSocket frame.
     Do(msg []byte, offset int) error
+    // Called after the connection to this client was closed.
+    Cleanup()
 }
 
 type Context struct {
@@ -164,4 +166,6 @@ func (ctx *Context) serve(conn net.Conn, cerr chan error) {
     if err != nil {
         sendError(cerr, err)
     }
+
+    server.Cleanup()
 }

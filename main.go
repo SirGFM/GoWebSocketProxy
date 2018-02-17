@@ -3,24 +3,10 @@ package main
 import (
     "fmt"
     "github.com/SirGFM/GoWebSocketProxy/websocket"
-    "net"
+    "github.com/SirGFM/GoWebSocketProxy/proxy"
     "os"
     "os/signal"
 )
-
-type myServer struct{}
-
-// No need to clone this, as nothing is stored
-func (m *myServer) Clone(conn net.Conn) (websocket.Server, error) {
-    return m, nil
-}
-
-// Do something with the received message.
-func (*myServer) Do(msg []byte, offset int) error {
-    msg = msg[offset:]
-    fmt.Printf("Got message %#x (\"%s\")\n", msg, string(msg))
-    return nil
-}
 
 func quitCleanup(c chan os.Signal, ctx *websocket.Context) {
     _ = <-c
@@ -38,7 +24,7 @@ func main() {
     go quitCleanup(signalTrap, ctx)
     signal.Notify(signalTrap, os.Interrupt)
 
-    err := ctx.Setup(&myServer{})
+    err := ctx.Setup(&proxy.Server{})
     if err != nil {
         panic(err.Error())
     }
