@@ -1,12 +1,16 @@
-
-package websocket
+package newWebsocket
 
 import (
-    "github.com/pkg/errors"
+    "errors"
 )
 
-// Error returned when a message is bigger than supported.
-var MessageToBig = errors.New("Message bigger than max int32")
+// How long between 'Pong' are sent
+const heartBeatFrequency = time.Second * 10
+// Signals that the asynchronous conn.Read timed out
+var receiveTimedOut = errors.New(
+    "websocket: Timed out waiting for the first few bytes of a message")
+// Signals that the connection to the end-point was closed.
+var connectionClosed = errors.New("websocket: Connection closed")
 
 // Minimal length (in bytes) of a message from a WebSocket.
 const MinHeaderLength = 2

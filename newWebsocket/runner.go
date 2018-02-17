@@ -1,26 +1,24 @@
-
-package proxy
+package newWebsocket
 
 import (
-    "github.com/SirGFM/GoWebSocketProxy/websocket"
     "io"
     "net"
     "time"
 )
 
-type proxy struct {
+const defaultTimeout = time.Second * 10
+
+type runner struct {
+    // The server that do stuff when it receives a message.
+    server Server
     // The connection with the end-point.
     conn net.Conn
     // Signals the status of the last attempt to receive from conn.
     connSelect chan error
-    // Channel used to redirect messages to another proxy.
-    send chan []byte
-    // Channel used to receive redirected messages by another proxy.
-    recv chan []byte
-    // Signal from the main thread that this proxy should exit.
+    // Signal from the main thread that this runner should exit.
     stop *bool
     // Buffer used to receive messages from the connection.
-    buf  []byte
+    buf []byte
     // Time to send the next heart beat
     heartBeatTime time.Time
     // Timeout for receiving messages
@@ -30,20 +28,22 @@ type proxy struct {
     closed bool
 }
 
-// Setup a new proxy that communicates with conn. It redirects messages received
-// from conn into send and sends messages received from recv into conn. When
-// stop is set to true (and after timeout), the proxy stops running and closes
-// its channel.
-func Setup(conn net.Conn, stop *bool, send chan []byte, recv chan []byte,
-    timeout time.Duration) *proxy {
+// Setup a new runner that communicates with conn. When stop is set to true (and
+// after timeout), the runner stops, as the caller should close the channel.
+func setupRunner(conn net.Conn, stop *bool, server Server,
+    timeout time.Duration) (r *runner, err error) {
 
-    return &proxy {
-        conn:           conn,
-        send:           send,
-        recv:           recv,
-        stop:           stop,
-        timeout:        timeout,
+    r = &runner {
+        server:  server,
+        conn:    conn,
+        stop:    stop,
+        timeout: timeout,
     }
+    r.buf = make([]byte, MinHeaderLength)
+
+    err = server.Setup()
+
+    return
 }
 
 // checkConnectionError converts the various possible connection errors to the
@@ -56,69 +56,73 @@ func checkConnectionError(err error) error {
     } else if err == io.EOF {
         return connectionClosed
     } else {
-        return err
+        return errors.Wrap(err, "websocket: Unexpected error")
     }
 }
 
 // goWaitForMessage is the goroutine called on waitForMessage. See that
 // function's documentation for details.
-func (p *proxy) goWaitForMessage() {
-    p.conn.SetReadDeadline(time.Now().Add(p.timeout))
+func (r *runner) goWaitForMessage() {
+    r.conn.SetReadDeadline(time.Now().Add(r.timeout))
 
-    _, err := p.conn.Read(p.buf[:websocket.MinHeaderLength])
-    p.connSelect <- checkConnectionError(err)
+    _, err := r.conn.Read(r.buf[:MinHeaderLength])
+    r.connSelect <- checkConnectionError(err)
 }
 
-// waitForMessage, sent from conn, and report the result on p.connSelect. The
+// waitForMessage, sent from conn, and report the result on r.connSelect. The
 // returned value may be one of:
 //   * nil, if a message was received (and may have more bytes pending)
 //   * connectionClosed, if the end-point was closed
 //   * receiveTimedOut, if no message was received
 //   * ???, if another error happened
-// The received part of the message (i.e., its first websocket.MinHeaderLength
-// bytes) shall be placed on p.buf.
-func (p *proxy) waitForMessage() {
-    // There's no need to synchronize accesss to p.connSelect because it always
+// The received part of the message (i.e., its first MinHeaderLength
+// bytes) shall be placed on r.buf.
+func (r *runner) waitForMessage() {
+    // There's no need to synchronize accesss to r.connSelect because it always
     // happen from the same goroutine/thread.
-    if p.connSelect == nil {
-        p.connSelect = make(chan error, 1)
-        go p.goWaitForMessage()
+    if r.connSelect == nil {
+        r.connSelect = make(chan error, 1)
+        go r.goWaitForMessage()
     }
 }
 
-// processMessage finishes receiving a pending message and put it into p.buf.
+// processMessage finishes receiving a pending message and put it into r.buf.
 // The message is already redirected through conn.send (if required).
-func (p *proxy) processMessage() (err error) {
+func (r *runner) processMessage() (err error) {
     var msgLen, offset int
 
-    p.buf, msgLen, offset, err = websocket.ReceiveFrame(p.conn, p.buf)
+    r.buf, msgLen, offset, err = receiveFrame(r.conn, r.buf)
     err = checkConnectionError(err)
     if err != nil {
         return err
     }
 
-    switch websocket.Opcode(p.buf[websocket.OpcodeIndex] & websocket.OpcodeMask) {
-    case websocket.ConnectionClose:
+    switch Opcode(r.buf[OpcodeIndex] & OpcodeMask) {
+    case ConnectionClose:
         // 5.5.1 of RFC 6455 defines that when a 'ConnectionClose' is
         // received, the end-point must reply as soon as possible with its
         // own 'ConnectionClose'.
-        if !p.closed {
+        if !r.closed {
             // The end-point started the closing procedure. In order to reply
             // and close the connection more easily, send the response and
             // return connectionClosed.
-            p.conn.Write(p.buf[:offset+msgLen])
+            r.conn.Write(r.buf[:offset+msgLen])
         }
         // The end-point replied to our 'ConnectionClose'. Simply exit.
         return connectionClosed
-    case websocket.Ping:
+    case Ping:
         // 5.5.2 and 5.5.3 of RFC 6455 defines that a Ping request must be
         // answered with a Pong response. If it contained any
         // 'Payload Data', the same data must be sent on the response.
         //
         // Therefore, simply change the operation to 'Pong' and move on.
-        p.buf[websocket.OpcodeIndex] &^= websocket.OpcodeMask
-        p.buf[websocket.OpcodeIndex] |= byte(websocket.Pong)
-    case websocket.Pong:
+        r.buf[OpcodeIndex] &^= OpcodeMask
+        r.buf[OpcodeIndex] |= byte(Pong)
+
+        _, err = r.conn.Write(r.buf)
+        err = checkConnectionError(err)
+        return
+    case Pong:
         // 5.5.3 of RFC 6455 defines that unsolicited 'Pong' requests acts as
         // heart-beat for the connection and no response is expected.
 
@@ -127,76 +131,75 @@ func (p *proxy) processMessage() (err error) {
 
     // If the connection was closed by this end-point, it must send a
     // 'ConnectionClose'. Ignore any other messages.
-    if p.closed {
+    if r.closed {
         return
     }
 
-    // Ensure that a safe buffer is used...
+    // Ensure that a safe buffer is used... This gave me a great deal of
+    // headache, since I was passing the cached buffer through a channel
+    // (in a proxy).
     b := make([]byte, offset+msgLen)
-    copy(b, p.buf[:offset+msgLen])
+    copy(b, r.buf[:offset+msgLen])
 
-    p.send <- b
+    err = server.Do(b)
 
-    return nil
+    return
 }
 
-func (p *proxy) Run() {
-    defer p.conn.Close()
-
-    p.buf = make([]byte, websocket.MinHeaderLength)
-
-    for !*p.stop {
+// Run handles the connection the end-point.
+func (r *runner) Run() {
+    for !*r.stop {
         var err error
 
-        p.waitForMessage()
+        r.waitForMessage()
 
         // Instead of the usual time.After for avoiding running indefinitely,
-        // p.connSelect gets signaled every p.timeout. Therefore, that is used
+        // r.connSelect gets signaled every r.timeout. Therefore, that is used
         // to avoid having the goroutine stuck waiting for messages.
         select {
-        case <-time.After(p.timeout+time.Millisecond*10):
+        case <-time.After(r.timeout+time.Millisecond*10):
             // Nothing received within the expected time slice
-        case msg := <- p.recv:
-            // Received a message from another proxy. Send it to our end-point.
-            p.conn.SetWriteDeadline(time.Now().Add(p.timeout))
-            _, err = p.conn.Write(msg)
-            err = checkConnectionError(err)
-            if err != nil {
-                // Failed to send data to our end-point.
-                // TODO Do something.
-                return
-            }
-        case err = <-p.connSelect:
+        //case msg := <-r.recv:
+        //    // Received a message from another proxy. Send it to our end-point.
+        //    r.conn.SetWriteDeadline(time.Now().Add(r.timeout))
+        //    _, err = r.conn.Write(msg)
+        //    err = checkConnectionError(err)
+        //    if err != nil {
+        //        // Failed to send data to our end-point.
+        //        // TODO Do something.
+        //        return
+        //    }
+        case err = <-r.connSelect:
             // If no error was detected, process the message. This allows
             // checking the error only once (regardless if from the channel or
             // the connection).
             if err == nil {
-                err = p.processMessage()
+                err = r.processMessage()
             }
 
             if err == connectionClosed {
                 // End-point was closed, nothing left to do here.
+                err = errors.New(connectionClosed.Error())
                 return
             } else if err == receiveTimedOut {
                 // Receive timed out, ignore the error and continue.
                 err = nil
             }
 
-            p.connSelect = nil
+            r.connSelect = nil
         }
 
         // From time to time, send a 'Pong' message to check that the connection
         // is alive.
-        if now := time.Now(); now.After(p.heartBeatTime) {
-            p.conn.SetWriteDeadline(time.Now().Add(p.timeout))
-            _, err = p.conn.Write(websocket.HeartBeatMessage)
+        if now := time.Now(); now.After(r.heartBeatTime) {
+            r.conn.SetWriteDeadline(time.Now().Add(r.timeout))
+            _, err = r.conn.Write(HeartBeatMessage)
             err = checkConnectionError(err)
             if err != nil {
-                // TODO Do something.
                 return
             }
 
-            p.heartBeatTime = now.Add(heartBeatFrequency)
+            r.heartBeatTime = now.Add(heartBeatFrequency)
         }
     }
 }

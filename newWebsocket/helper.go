@@ -1,13 +1,13 @@
-
-package websocket
+package newWebsocket
 
 import (
     "encoding/binary"
+    "github.com/pkg/errors"
     "net"
     "time"
 )
 
-// expandBuffer in so it as at least min bytes and place it in out.
+// expandBuffer in so it has at least min bytes and place it in out.
 func expandBuffer(in []byte, min int) (out []byte) {
     if len(in) < min {
         out = make([]byte, min)
@@ -19,40 +19,43 @@ func expandBuffer(in []byte, min int) (out []byte) {
     return
 }
 
-// readFullLength from conn, expanding buf needed (only so length more bytes fit
-// into it).
+// readFullLength from conn, expanding buf as needed (only so length more bytes
+// fit into it).
 func readFullLength(conn net.Conn, buf []byte, length int) (retBuf []byte,
     err error) {
 
     var n int
+    var gerr error
 
     retBuf = expandBuffer(buf, MinHeaderLength+length)
 
     conn.SetReadDeadline(time.Now().Add(time.Second))
-    n, err = conn.Read(retBuf[MinHeaderLength:MinHeaderLength+length])
-    if err != nil {
-        return
+    n, gerr = conn.Read(retBuf[MinHeaderLength:MinHeaderLength+length])
+    if gerr != nil {
+        err = errors.Wrap(err, "websocket: Failed to read message's length")
     } else if n != length {
-        // TODO Set error
+        err = errors.New("websocket: Failed to read the entire message's length")
     }
 
     return
 }
 
-// ReceiveFrame from conn on buf. MinHeaderLength bytes should have been read into
+// receiveFrame from conn on buf. MinHeaderLength bytes should have been read into
 // buf before calling this function, so frame length may be read.
 //
 // buf will be expand as needed and later returned into retBuf. msgLen is the
 // length of "PayloadData", which may be read starting on offset. (i.e., the
 // payload should be read as retBuf[offset:msgLen])
-func ReceiveFrame(conn net.Conn, buf []byte) (retBuf []byte, msgLen, offset int,
+func receiveFrame(conn net.Conn, buf []byte) (retBuf []byte, msgLen, offset int,
     err error) {
 
+    var gerr error
     var key [MaskLength]byte
     var n int
 
     if buf[MaskIndex] & MaskBit == 0 {
-        // TODO Fail because received message is unmasked
+        err = errors.New("websocket: Message is missing its mask bits")
+        return
     }
     // Remove the mask
     buf[MaskIndex] &^= MaskBit
@@ -81,7 +84,7 @@ func ReceiveFrame(conn net.Conn, buf []byte) (retBuf []byte, msgLen, offset int,
         offset += 8
         len64 := uint64(binary.BigEndian.Uint64(retBuf[MinHeaderLength:offset]))
         if len64 >= 0x100000000 {
-            err = MessageToBig
+            err = errors.New("websocket: Message bigger than max int32")
             return
         }
         msgLen = int(len64 & 0x7fffffff)
@@ -93,20 +96,24 @@ func ReceiveFrame(conn net.Conn, buf []byte) (retBuf []byte, msgLen, offset int,
 
     // Read "Masking-key"
     conn.SetReadDeadline(time.Now().Add(time.Second))
-    n, err = conn.Read(key[:])
-    if err != nil {
+    n, gerr = conn.Read(key[:])
+    if gerr != nil {
+        err = errors.Wrap(gerr, "websocket: Failed to read masking-key")
         return
     } else if n != MaskLength {
-        // TODO Set error
+        err = errors.New( "websocket: Failed to read the entire masking-key")
+        return
     }
 
     // Finish reading the message
     conn.SetReadDeadline(time.Now().Add(time.Second))
-    n, err = conn.Read(retBuf[offset:offset+msgLen])
-    if err != nil {
+    n, gerr = conn.Read(retBuf[offset:offset+msgLen])
+    if gerr != nil {
+        err = errors.Wrap(gerr, "websocket: Failed to read the message")
         return
     } else if n != msgLen {
-        // TODO Set error
+        err = errors.New( "websocket: Failed to read the entire message")
+        return
     }
 
     // Unmask the message
