@@ -28,6 +28,9 @@ const MaskIndex = 1
 // Bit used to check whether "Payload data" is masked.
 const MaskBit = 0x80
 
+// Bit used to indicate that this is the last (or only) part of a message.
+const FinBit = 0x80
+
 // Index of the opcode within a Frame.
 const LengthIndex = 1
 

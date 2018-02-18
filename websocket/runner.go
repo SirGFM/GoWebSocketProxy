@@ -159,16 +159,6 @@ func (r *runner) Run() (err error) {
         select {
         case <-time.After(r.timeout+time.Millisecond*10):
             // Nothing received within the expected time slice
-        //case msg := <-r.recv:
-        //    // Received a message from another proxy. Send it to our end-point.
-        //    r.conn.SetWriteDeadline(time.Now().Add(r.timeout))
-        //    _, err = r.conn.Write(msg)
-        //    err = checkConnectionError(err)
-        //    if err != nil {
-        //        // Failed to send data to our end-point.
-        //        // TODO Do something.
-        //        return
-        //    }
         case err = <-r.connSelect:
             // If no error was detected, process the message. This allows
             // checking the error only once (regardless if from the channel or

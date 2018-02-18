@@ -124,3 +124,27 @@ func receiveFrame(conn net.Conn, buf []byte) (retBuf []byte, msgLen, offset int,
 
     return
 }
+
+// WrapFrame data. If buf is supplied, the WebSocket frame is written into it,
+// avoiding allocing memory as much as possible.
+func WrapFrame(opcode Opcode, data, buf []byte) (retBuf []byte) {
+    // Clear the buffer. This works even if  buf is nil.
+    retBuf = buf[:0]
+
+    // Set the message as being a single part and of the given type.
+    retBuf = append(retBuf, FinBit | byte(opcode))
+
+    // Write the length of the payload
+    if l := len(data); l <= 0x7F {
+        retBuf = append(retBuf, byte(len(data)))
+    } else if l <= 0xFFFF {
+        retBuf = append(retBuf, Extended16BitLength, 0,0)
+        binary.BigEndian.PutUint16(retBuf[MinHeaderLength:], uint16(len(data)))
+    } else {
+        retBuf = append(retBuf, Extended64BitLength, 0,0,0,0,0,0,0,0)
+        binary.BigEndian.PutUint64(retBuf[MinHeaderLength:], uint64(len(data)))
+    }
+
+    // Copy the payload into the message
+    return append(retBuf, data...)
+}
