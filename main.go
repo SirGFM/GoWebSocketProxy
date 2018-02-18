@@ -1,58 +1,116 @@
-
 package main
 
 import (
-    //"bytes"
+    "crypto/tls"
+    "crypto/x509"
+    "encoding/pem"
+    "flag"
     "fmt"
-    "net"
+    "github.com/pkg/errors"
+    "github.com/SirGFM/GoWebSocketProxy/websocket"
+    "github.com/SirGFM/GoWebSocketProxy/proxy"
+    "io/ioutil"
     "os"
     "os/signal"
 )
 
-func quitCleanup(c chan os.Signal, stop *bool, tcpListener *net.Listener) {
+// Parses a PEM certificate.
+func parseCertificate(path string) (cert *x509.Certificate, err error) {
+    var pemData []byte
+
+    pemData, err = ioutil.ReadFile(path)
+    if err != nil {
+        return
+    }
+    block, rest := pem.Decode(pemData)
+    if block == nil || len(rest) != 0 {
+        err = errors.New("Failed to decode the PEM certificate")
+        return
+    }
+    cert, err = x509.ParseCertificate(block.Bytes)
+
+    return
+}
+
+func quitCleanup(c chan os.Signal, ctx *websocket.Context) {
     _ = <-c
 
-    *stop = true
-    if *tcpListener != nil {
-        (*tcpListener).Close()
-    }
+    ctx.Close()
 }
 
 func main() {
-    var ln net.Listener
     var signalTrap chan os.Signal
-    var proxyConn chan []byte
-    var err error
+    var cacert, cert, key, uri, url string
     var port int
-    var stop bool
+    var forceCert bool
 
-    port = 60000
+    // Parse command line arguments
+    flag.StringVar(&url, "url", "", "URL accepted by the server. Empty defaults to any address/url.")
+    flag.StringVar(&uri, "uri", "/proxy", "URI that references the WebSocket server.")
+    flag.IntVar(&port, "port", 60000, "Port for the WebSocket server.")
+    flag.StringVar(&cacert, "clientCacert", "", "Path to the CA certificate (that verifies clients' certificates).")
+    flag.StringVar(&cert, "cert", "", "Path to the server's certificate.")
+    flag.StringVar(&key, "key", "", "Path to the server's private key.")
+    flag.BoolVar(&forceCert, "forceClientCert", false, "Requires users to supply a certificate (when using TLS).")
+    flag.Parse()
 
+    // Create the WebSocket context
+    ctx := websocket.NewContext(url, uri, port, 2)
+    defer ctx.Close()
+
+    // Detect keyboard interrupts (Ctrl+C) and exit gracefully.
     signalTrap = make(chan os.Signal, 1)
-    go quitCleanup(signalTrap, &stop, &ln)
-
+    go quitCleanup(signalTrap, ctx)
     signal.Notify(signalTrap, os.Interrupt)
 
-    ln, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
+    // Start the server
+    err := ctx.Setup(&proxy.Server{})
     if err != nil {
-        panic(err)
+        panic(err.Error())
     }
-    defer func() {
-        if ln != nil {
-            ln.Close()
-        }
-        ln = nil
-    }()
 
-    proxyConn = make(chan []byte, 1)
-
-    fmt.Println("Waiting...")
-    for !stop {
-        conn, err := ln.Accept()
+    // If desired, setup the connection over TLS
+    if cert != "" && key != "" {
+        tlsCert, err := tls.LoadX509KeyPair(cert, key)
         if err != nil {
-            fmt.Printf("Failed to accept conn: %+v\n", err)
-            continue
+            panic(err.Error())
         }
-        go wsServer(conn, &stop, proxyConn)
+
+        config := &tls.Config{
+            Certificates: []tls.Certificate{tlsCert},
+            NextProtos:   []string{"wss"},
+        }
+
+        // Load the client CA, if supplied
+        if cacert != "" {
+            cert, err := parseCertificate(cacert)
+            if err != nil {
+                panic(err.Error())
+            }
+
+            pool := x509.NewCertPool()
+            pool.AddCert(cert)
+            config.ClientCAs = pool
+            if !forceCert {
+                config.ClientAuth = tls.VerifyClientCertIfGiven
+            } else {
+                config.ClientAuth = tls.RequireAndVerifyClientCert
+            }
+        }
+
+        // Set the TLS configurations
+        ctx.SetTlsConfig(config)
+    }
+
+    cerr := make(chan error)
+    go ctx.Run(cerr)
+
+    for {
+        err = <-cerr
+        if err == nil {
+            break
+        }
+
+        fmt.Printf("Got error from server: %+v\n", err)
     }
 }

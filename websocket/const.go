@@ -1,12 +1,14 @@
-
 package websocket
 
 import (
-    "github.com/pkg/errors"
+    "errors"
 )
 
-// Error returned when a message is bigger than supported.
-var MessageToBig = errors.New("Message bigger than max int32")
+// Signals that the asynchronous conn.Read timed out
+var receiveTimedOut = errors.New(
+    "websocket: Timed out waiting for the first few bytes of a message")
+// Signals that the connection to the end-point was closed.
+var connectionClosed = errors.New("websocket: Connection closed")
 
 // Minimal length (in bytes) of a message from a WebSocket.
 const MinHeaderLength = 2
@@ -25,6 +27,9 @@ const MaskIndex = 1
 
 // Bit used to check whether "Payload data" is masked.
 const MaskBit = 0x80
+
+// Bit used to indicate that this is the last (or only) part of a message.
+const FinBit = 0x80
 
 // Index of the opcode within a Frame.
 const LengthIndex = 1

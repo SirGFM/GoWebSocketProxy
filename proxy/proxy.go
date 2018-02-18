@@ -1,202 +1,132 @@
-
 package proxy
 
 import (
+    "github.com/pkg/errors"
     "github.com/SirGFM/GoWebSocketProxy/websocket"
-    "io"
+    "sync"
     "net"
-    "time"
 )
 
-type proxy struct {
-    // The connection with the end-point.
+// Synchronizes access to chanA and chanB
+var _chanMutex sync.Mutex
+// One of the two channels usable by this server
+var _chanA *closeableChannel
+// One of the two channels usable by this server
+var _chanB *closeableChannel
+
+// Dumb channel-wrapper that allows avoiding writing to a closed channel
+type closeableChannel struct {
+    Mutex sync.Mutex
+    IsClosed bool
+    Channel chan []byte
+}
+
+// The proxy server
+type Server struct{
+    // Connection to the end-point.
     conn net.Conn
-    // Signals the status of the last attempt to receive from conn.
-    connSelect chan error
-    // Channel used to redirect messages to another proxy.
-    send chan []byte
-    // Channel used to receive redirected messages by another proxy.
-    recv chan []byte
-    // Signal from the main thread that this proxy should exit.
-    stop *bool
-    // Buffer used to receive messages from the connection.
-    buf  []byte
-    // Time to send the next heart beat
-    heartBeatTime time.Time
-    // Timeout for receiving messages
-    timeout time.Duration
-    // If a connection closed was send but there was no response from the other
-    // end-point yet.
-    closed bool
+    // Channel connected to another server (from which that server sends
+    // messages)
+    recv *closeableChannel
+    // Signals that this server should get closed
+    stop chan struct{}
 }
 
-// Setup a new proxy that communicates with conn. It redirects messages received
-// from conn into send and sends messages received from recv into conn. When
-// stop is set to true (and after timeout), the proxy stops running and closes
-// its channel.
-func Setup(conn net.Conn, stop *bool, send chan []byte, recv chan []byte,
-    timeout time.Duration) *proxy {
-
-    return &proxy {
-        conn:           conn,
-        send:           send,
-        recv:           recv,
-        stop:           stop,
-        timeout:        timeout,
-    }
-}
-
-// checkConnectionError converts the various possible connection errors to the
-// pre-defined ones.
-func checkConnectionError(err error) error {
-    if netErr, ok := err.(*net.OpError); ok && netErr != nil &&
-        netErr.Err == net.ErrWriteToConnected {
-
-        return receiveTimedOut
-    } else if err == io.EOF {
-        return connectionClosed
-    } else {
-        return err
-    }
-}
-
-// goWaitForMessage is the goroutine called on waitForMessage. See that
-// function's documentation for details.
-func (p *proxy) goWaitForMessage() {
-    p.conn.SetReadDeadline(time.Now().Add(p.timeout))
-
-    _, err := p.conn.Read(p.buf[:websocket.MinHeaderLength])
-    p.connSelect <- checkConnectionError(err)
-}
-
-// waitForMessage, sent from conn, and report the result on p.connSelect. The
-// returned value may be one of:
-//   * nil, if a message was received (and may have more bytes pending)
-//   * connectionClosed, if the end-point was closed
-//   * receiveTimedOut, if no message was received
-//   * ???, if another error happened
-// The received part of the message (i.e., its first websocket.MinHeaderLength
-// bytes) shall be placed on p.buf.
-func (p *proxy) waitForMessage() {
-    // There's no need to synchronize accesss to p.connSelect because it always
-    // happen from the same goroutine/thread.
-    if p.connSelect == nil {
-        p.connSelect = make(chan error, 1)
-        go p.goWaitForMessage()
-    }
-}
-
-// processMessage finishes receiving a pending message and put it into p.buf.
-// The message is already redirected through conn.send (if required).
-func (p *proxy) processMessage() (err error) {
-    var msgLen, offset int
-
-    p.buf, msgLen, offset, err = websocket.ReceiveFrame(p.conn, p.buf)
-    err = checkConnectionError(err)
-    if err != nil {
-        return err
-    }
-
-    switch websocket.Opcode(p.buf[websocket.OpcodeIndex] & websocket.OpcodeMask) {
-    case websocket.ConnectionClose:
-        // 5.5.1 of RFC 6455 defines that when a 'ConnectionClose' is
-        // received, the end-point must reply as soon as possible with its
-        // own 'ConnectionClose'.
-        if !p.closed {
-            // The end-point started the closing procedure. In order to reply
-            // and close the connection more easily, send the response and
-            // return connectionClosed.
-            p.conn.Write(p.buf[:offset+msgLen])
+// Redirects messages received by another proxy server
+func (p *Server) redirect() {
+    for {
+        select {
+        case <-p.stop:
+            // Stops this server
+            return
+        case data := <-p.recv.Channel:
+            // Received data from the other server: redirect to this' end-point
+            p.conn.Write(data)
         }
-        // The end-point replied to our 'ConnectionClose'. Simply exit.
-        return connectionClosed
-    case websocket.Ping:
-        // 5.5.2 and 5.5.3 of RFC 6455 defines that a Ping request must be
-        // answered with a Pong response. If it contained any
-        // 'Payload Data', the same data must be sent on the response.
-        //
-        // Therefore, simply change the operation to 'Pong' and move on.
-        p.buf[websocket.OpcodeIndex] &^= websocket.OpcodeMask
-        p.buf[websocket.OpcodeIndex] |= byte(websocket.Pong)
-    case websocket.Pong:
-        // 5.5.3 of RFC 6455 defines that unsolicited 'Pong' requests acts as
-        // heart-beat for the connection and no response is expected.
+    }
+}
 
-        // TODO Check if a 'Pong' was expected and clear that flag.
+// Creates a new server with a global reference (so other servers may redirect
+// message to it, and vice-versa).
+func (*Server) Clone(conn net.Conn) (websocket.Server, error) {
+    _chanMutex.Lock()
+    defer _chanMutex.Unlock()
+
+    // Check if there's at least one free channel
+    if _chanA != nil && _chanB != nil {
+        return nil, errors.New("proxy: No available channel")
     }
 
-    // If the connection was closed by this end-point, it must send a
-    // 'ConnectionClose'. Ignore any other messages.
-    if p.closed {
-        return
+    p := &Server{
+        conn: conn,
+    }
+    p.stop = make(chan struct{})
+    p.recv = &closeableChannel{}
+    p.recv.Channel = make(chan []byte)
+
+    // Store the channel globally
+    if _chanA == nil {
+        _chanA = p.recv
+    } else {
+        _chanB = p.recv
     }
 
-    // Ensure that a safe buffer is used...
-    b := make([]byte, offset+msgLen)
-    copy(b, p.buf[:offset+msgLen])
+    // Start the redirecting goroutine
+    go p.redirect()
 
-    p.send <- b
+    return p, nil
+}
+
+// Redirect the received message to any other listening server.
+func (p *Server) Do(msg []byte, offset int) error {
+    var otherChan *closeableChannel
+
+    // Retrieve the global channel owned by another server
+    _chanMutex.Lock()
+    if _chanA == p.recv {
+        otherChan = _chanB
+    } else {
+        otherChan = _chanA
+    }
+    _chanMutex.Unlock()
+
+    if otherChan == nil {
+        return nil
+    }
+
+    // If it hasn't been closed yet (or since acquiring its address), send it
+    // our data.
+    otherChan.Mutex.Lock()
+    if !otherChan.IsClosed {
+        // Ensure that a safe buffer is used... This gave me a great deal of
+        // headache, since I was passing the cached buffer through a channel
+        // (in a proxy).
+        b := make([]byte, len(msg))
+        copy(b, msg)
+        otherChan.Channel <- b
+    }
+    otherChan.Mutex.Unlock()
 
     return nil
 }
 
-func (p *proxy) Run() {
-    defer p.conn.Close()
+// Makes this server stop running and clears its global reference.
+func (p *Server) Cleanup() {
+    // Signal the server to stop
+    p.stop <- struct{}{}
 
-    p.buf = make([]byte, websocket.MinHeaderLength)
+    // Releases the server's channel
+    p.recv.Mutex.Lock()
+    p.recv.IsClosed = true
+    close(p.recv.Channel)
+    p.recv.Mutex.Unlock()
 
-    for !*p.stop {
-        var err error
-
-        p.waitForMessage()
-
-        // Instead of the usual time.After for avoiding running indefinitely,
-        // p.connSelect gets signaled every p.timeout. Therefore, that is used
-        // to avoid having the goroutine stuck waiting for messages.
-        select {
-        case <-time.After(p.timeout+time.Millisecond*10):
-            // Nothing received within the expected time slice
-        case msg := <- p.recv:
-            // Received a message from another proxy. Send it to our end-point.
-            p.conn.SetWriteDeadline(time.Now().Add(p.timeout))
-            _, err = p.conn.Write(msg)
-            err = checkConnectionError(err)
-            if err != nil {
-                // Failed to send data to our end-point.
-                // TODO Do something.
-                return
-            }
-        case err = <-p.connSelect:
-            // If no error was detected, process the message. This allows
-            // checking the error only once (regardless if from the channel or
-            // the connection).
-            if err == nil {
-                err = p.processMessage()
-            }
-
-            if err == connectionClosed {
-                // End-point was closed, nothing left to do here.
-                return
-            } else if err == receiveTimedOut {
-                // Receive timed out, ignore the error and continue.
-                err = nil
-            }
-
-            p.connSelect = nil
-        }
-
-        // From time to time, send a 'Pong' message to check that the connection
-        // is alive.
-        if now := time.Now(); now.After(p.heartBeatTime) {
-            p.conn.SetWriteDeadline(time.Now().Add(p.timeout))
-            _, err = p.conn.Write(websocket.HeartBeatMessage)
-            err = checkConnectionError(err)
-            if err != nil {
-                // TODO Do something.
-                return
-            }
-
-            p.heartBeatTime = now.Add(heartBeatFrequency)
-        }
+    // Remove it from the global list
+    _chanMutex.Lock()
+    if _chanA == p.recv {
+        _chanA = nil
+    } else {
+        _chanB = nil
     }
+    _chanMutex.Unlock()
 }

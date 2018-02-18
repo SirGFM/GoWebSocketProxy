@@ -1,5 +1,4 @@
-
-package main
+package websocket
 
 import (
     "bufio"
@@ -12,9 +11,12 @@ import (
     "strings"
 )
 
-const strict = false
+// Currently, only ignores if no |Host| was supplied in the header.
+const Strict = false
+// GUID used by every WebSocket server (as specified on the RFC).
 const WS_SERVER_ID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+// Calculates the server response key, as defined by the RFC (see 1.3)
 func calculateServerResponseKey(key string) string {
     s := sha1.Sum([]byte(key + WS_SERVER_ID))
     b64 := base64.StdEncoding.EncodeToString(s[:])
@@ -22,9 +24,9 @@ func calculateServerResponseKey(key string) string {
     return b64
 }
 
-func handshake(conn net.Conn, validUris map[string]bool) (
-    res http.Response, uri string, retErr error) {
-
+// Handshake handles checking and upgrading a HTTP request into a WebSocket
+// connection (as defined by RFC 6455 - The WebSocket Protocol).
+func handshake(conn net.Conn, validUri string) (res http.Response, retErr error) {
     var b64ConnKey string
 
     // Properly set the status code text on exit
@@ -48,7 +50,6 @@ func handshake(conn net.Conn, validUris map[string]bool) (
     res.ProtoMajor = req.ProtoMajor
     res.ProtoMinor = req.ProtoMinor
 
-    // RFC 6455 (The WebSocket Protocol)
     // 4.2.1 Reading the Client's Opening Handshake
 
     // 1. Check that it's a HTTP/1.1 or higher GET
@@ -67,17 +68,15 @@ func handshake(conn net.Conn, validUris map[string]bool) (
     } else if req.RequestURI == "" {
         retErr = errors.New("Missing RequestURI in request")
         return
-    } else if !validUris[req.RequestURI] {
+    } else if req.RequestURI != validUri {
         retErr = errors.New("Invalid RequestURI")
         return
     }
 
-    uri = req.RequestURI
-
     // 2. Check for a |Host| header with server's authority
     if host := req.Header.Get("Host"); len(host) == 0 {
         retErr = errors.New("Missing |Host| header field")
-        if strict {
+        if Strict {
             return
         } else {
             fmt.Printf("  Ignoring: %s\n", retErr.Error())
@@ -137,4 +136,12 @@ func handshake(conn net.Conn, validUris map[string]bool) (
     // 5.6 Later
 
     return
+}
+
+// Updates a HTTP Response to have an response code of Service Unavailable.
+func updateResponseUnavailable(res *http.Response) {
+    res.StatusCode = http.StatusServiceUnavailable
+    res.Status = http.StatusText(res.StatusCode)
+    // Remove any previously set header
+    res.Header = nil
 }

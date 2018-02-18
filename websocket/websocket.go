@@ -1,119 +1,210 @@
-
 package websocket
 
 import (
-    "encoding/binary"
+    "crypto/tls"
+    "fmt"
+    "github.com/pkg/errors"
     "net"
-    "time"
+    "sync"
 )
 
-// expandBuffer in so it as at least min bytes and place it in out.
-func expandBuffer(in []byte, min int) (out []byte) {
-    if len(in) < min {
-        out = make([]byte, min)
-        copy(out, in)
+type Server interface {
+    // Returns a new instance of this server, passed to the runner.
+    Clone(conn net.Conn) (Server, error)
+    // Do something with the received message. Offset points to the actual
+    // payload within the WebSocket frame.
+    Do(msg []byte, offset int) error
+    // Called after the connection to this client was closed.
+    Cleanup()
+}
+
+type Context struct {
+    // Local IP where connections are accept (blank for accepting globally).
+    Ip string
+    // URI for accepting connections (e.g., 'ws://Ip:Port/Uri').
+    Uri string
+    // Port where the WebSocket will listen to. Cannot be changed after starting
+    // the server.
+    Port int
+    // How many simultaneous connections this server accepts. Anything less or
+    // equal to 0 means unlimited.
+    MaximumConnections int
+
+    // Configuration used when accepting connections over TLS.
+    tlsConfig *tls.Config
+    // Synchronizes access to tlsMutext.
+    tlsMutex sync.Mutex
+    // Server that does something with the received messages.
+    serverTempl Server
+    // Connection listener.
+    ln net.Listener
+    // Synchronizes access to connectionCounter.
+    counterMutex sync.Mutex
+    // Number of active connections.
+    connectionCounter int
+    // Whether the server is running.
+    running bool
+}
+
+// Creates a new context. The context may be manually instantiated as well (as
+// long as all public fields are set).
+func NewContext(ip, uri string, port, maxConn int) *Context {
+    return &Context{
+        Ip:                 ip,
+        Uri:                uri,
+        Port:               port,
+        MaximumConnections: maxConn,
+    }
+}
+
+// Closes and stops the listening server.
+func (ctx *Context) Close() {
+    ctx.running = false
+    if ctx.ln != nil {
+        ctx.ln.Close()
+        ctx.ln = nil
+        ctx.serverTempl = nil
+    }
+}
+
+// Set everything up so the conectext may accept connections.
+func (ctx *Context) Setup(serverTempl Server) error {
+    var err error
+
+    if ctx.Port <= 0 {
+        return errors.New("websocket: Invalid port")
+    }
+
+    ctx.ln, err = net.Listen("tcp", fmt.Sprintf("%s:%d", ctx.Ip, ctx.Port))
+    if err != nil {
+        return errors.Wrap(err, "websocket: Failed to listen to address")
+    }
+
+    ctx.serverTempl = serverTempl
+
+    return nil
+}
+
+// Set the new TLS configuration. Open connections will still use the old
+// credentials, but new connections will automatically use this new one.
+func (ctx *Context) SetTlsConfig(config *tls.Config) {
+    ctx.tlsMutex.Lock()
+    if config != nil {
+        // Stores a copy of the TLS configuration (to avoid unsynchronized
+        // access)
+        cpy := *config
+        ctx.tlsConfig = &cpy
     } else {
-        out = in
+        ctx.tlsConfig = nil
     }
-
-    return
+    ctx.tlsMutex.Unlock()
 }
 
-// readFullLength from conn, expanding buf needed (only so length more bytes fit
-// into it).
-func readFullLength(conn net.Conn, buf []byte, length int) (retBuf []byte,
-    err error) {
-
-    var n int
-
-    retBuf = expandBuffer(buf, MinHeaderLength+length)
-
-    conn.SetReadDeadline(time.Now().Add(time.Second))
-    n, err = conn.Read(retBuf[MinHeaderLength:MinHeaderLength+length])
-    if err != nil {
-        return
-    } else if n != length {
-        // TODO Set error
+// Sends an error (if the channel is non-nil).
+func sendError(cerr chan error, err error) {
+    if cerr != nil {
+        cerr <- err
     }
-
-    return
 }
 
-// ReceiveFrame from conn on buf. MinHeaderLength bytes should have been read into
-// buf before calling this function, so frame length may be read.
+// Runs the websocket server and blocks execution until 'Stop' is called. Can
+// (and should) safelly be called from/as a goroutine. If it fails to accept any
+// connection, the error is reported through the supplied channel (if any).
 //
-// buf will be expand as needed and later returned into retBuf. msgLen is the
-// length of "PayloadData", which may be read starting on offset. (i.e., the
-// payload should be read as retBuf[offset:msgLen])
-func ReceiveFrame(conn net.Conn, buf []byte) (retBuf []byte, msgLen, offset int,
-    err error) {
-
-    var key [MaskLength]byte
-    var n int
-
-    if buf[MaskIndex] & MaskBit == 0 {
-        // TODO Fail because received message is unmasked
-    }
-    // Remove the mask
-    buf[MaskIndex] &^= MaskBit
-
-    // By default, "Payload Data" starts after the basic header (and
-    // "Masking-key" will be removed from the message).
-    offset = MinHeaderLength
-
-    // Read "Payload Data" length, expanding the buffer as necessary.
-    msgLen = int(buf[LengthIndex] & LengthMask)
-    switch msgLen {
-    case Extended16BitLength:
-        retBuf, err = readFullLength(conn, buf, 2)
-        if err != nil {
-            return
-        }
-
-        offset += 2
-        msgLen = int(binary.BigEndian.Uint16(retBuf[MinHeaderLength:offset]))
-    case Extended64BitLength:
-        retBuf, err = readFullLength(conn, buf, 8)
-        if err != nil {
-            return
-        }
-
-        offset += 8
-        len64 := uint64(binary.BigEndian.Uint64(retBuf[MinHeaderLength:offset]))
-        if len64 >= 0x100000000 {
-            err = MessageToBig
-            return
-        }
-        msgLen = int(len64 & 0x7fffffff)
-    default:
-        retBuf = buf
-    }
-
-    retBuf = expandBuffer(retBuf, offset+msgLen)
-
-    // Read "Masking-key"
-    conn.SetReadDeadline(time.Now().Add(time.Second))
-    n, err = conn.Read(key[:])
-    if err != nil {
+// The server signals that it has exited by sending a nil error to the channel.
+func (ctx *Context) Run(cerr chan error) {
+    if ctx.ln == nil || ctx.serverTempl == nil {
+        sendError(cerr, errors.New("websocket: Setup hasn't been configured yet"))
         return
-    } else if n != MaskLength {
-        // TODO Set error
     }
 
-    // Finish reading the message
-    conn.SetReadDeadline(time.Now().Add(time.Second))
-    n, err = conn.Read(retBuf[offset:offset+msgLen])
-    if err != nil {
+    ctx.running = true
+    for ctx.running {
+        conn, err := ctx.ln.Accept()
+        if err != nil {
+            sendError(cerr, errors.Wrap(err, "websocket: Failed to accept connection"))
+            continue
+        }
+
+        // Wrap the connection before continuing
+        ctx.tlsMutex.Lock()
+        if ctx.tlsConfig != nil {
+            go ctx.serveTls(tls.Server(conn, ctx.tlsConfig), cerr)
+        } else {
+            go ctx.serve(conn, cerr)
+        }
+        ctx.tlsMutex.Unlock()
+    }
+
+    sendError(cerr, nil)
+}
+
+// Serves a websocket connection over TLS.
+func (ctx *Context) serveTls(conn *tls.Conn, cerr chan error) {
+    gerr := conn.Handshake()
+    if gerr != nil {
+        err := errors.Wrap(gerr, "websocket: TLS handshake failed")
+        sendError(cerr, err)
         return
-    } else if n != msgLen {
-        // TODO Set error
     }
 
-    // Unmask the message
-    payload := retBuf[offset:]
-    for i := 0; i < msgLen; i++ {
-        payload[i] = payload[i] ^ key[i & 0x3]
+    ctx.serve(conn, cerr)
+}
+
+// Serves a websocket connection.
+func (ctx *Context) serve(conn net.Conn, cerr chan error) {
+    defer conn.Close()
+
+    // Try to upgrade the connection to a WebSocket connection
+    res, err := handshake(conn, ctx.Uri)
+    if err == nil {
+        // On success, check if the server may still accept connections. The
+        // lock can't be defer'ed since it's quite short lived.
+        ctx.counterMutex.Lock()
+        if ctx.connectionCounter >= ctx.MaximumConnections &&
+            ctx.MaximumConnections > 0 {
+
+            // Set the error
+            updateResponseUnavailable(&res)
+            err = errors.New("websocket: Too many connections")
+        } else {
+            ctx.connectionCounter++
+        }
+        ctx.counterMutex.Unlock()
     }
 
-    return
+    res.Write(conn)
+
+    if err != nil {
+        // On failure, simply return (since the response has already been sent).
+        sendError(cerr, err)
+        return
+    }
+
+    // Release the counter on exit
+    defer func(ictx *Context) {
+        ictx.counterMutex.Lock()
+        ictx.connectionCounter--
+        ictx.counterMutex.Unlock()
+    } (ctx)
+
+    // Clone the server (if needed)
+    server, err := ctx.serverTempl.Clone(conn)
+    if err != nil {
+        sendError(cerr, err)
+        return
+    }
+
+    // Runs until any error happens
+    r, err := setupRunner(conn, &ctx.running, server, defaultTimeout)
+    if err != nil {
+        sendError(cerr, err)
+        return
+    }
+    err = r.Run()
+    if err != nil {
+        sendError(cerr, err)
+    }
+
+    server.Cleanup()
 }
