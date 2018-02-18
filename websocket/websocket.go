@@ -1,6 +1,7 @@
 package websocket
 
 import (
+    "crypto/tls"
     "fmt"
     "github.com/pkg/errors"
     "net"
@@ -29,6 +30,10 @@ type Context struct {
     // equal to 0 means unlimited.
     MaximumConnections int
 
+    // Configuration used when accepting connections over TLS.
+    tlsConfig *tls.Config
+    // Synchronizes access to tlsMutext.
+    tlsMutex sync.Mutex
     // Server that does something with the received messages.
     serverTempl Server
     // Connection listener.
@@ -80,6 +85,21 @@ func (ctx *Context) Setup(serverTempl Server) error {
     return nil
 }
 
+// Set the new TLS configuration. Open connections will still use the old
+// credentials, but new connections will automatically use this new one.
+func (ctx *Context) SetTlsConfig(config *tls.Config) {
+    ctx.tlsMutex.Lock()
+    if config != nil {
+        // Stores a copy of the TLS configuration (to avoid unsynchronized
+        // access)
+        cpy := *config
+        ctx.tlsConfig = &cpy
+    } else {
+        ctx.tlsConfig = nil
+    }
+    ctx.tlsMutex.Unlock()
+}
+
 // Sends an error (if the channel is non-nil).
 func sendError(cerr chan error, err error) {
     if cerr != nil {
@@ -106,10 +126,29 @@ func (ctx *Context) Run(cerr chan error) {
             continue
         }
 
-        go ctx.serve(conn, cerr)
+        // Wrap the connection before continuing
+        ctx.tlsMutex.Lock()
+        if ctx.tlsConfig != nil {
+            go ctx.serveTls(tls.Server(conn, ctx.tlsConfig), cerr)
+        } else {
+            go ctx.serve(conn, cerr)
+        }
+        ctx.tlsMutex.Unlock()
     }
 
     sendError(cerr, nil)
+}
+
+// Serves a websocket connection over TLS.
+func (ctx *Context) serveTls(conn *tls.Conn, cerr chan error) {
+    gerr := conn.Handshake()
+    if gerr != nil {
+        err := errors.Wrap(gerr, "websocket: TLS handshake failed")
+        sendError(cerr, err)
+        return
+    }
+
+    ctx.serve(conn, cerr)
 }
 
 // Serves a websocket connection.
