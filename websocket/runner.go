@@ -137,13 +137,7 @@ func (r *runner) processMessage() (err error) {
         return
     }
 
-    // Ensure that a safe buffer is used... This gave me a great deal of
-    // headache, since I was passing the cached buffer through a channel
-    // (in a proxy).
-    b := make([]byte, offset+msgLen)
-    copy(b, r.buf[:offset+msgLen])
-
-    err = r.server.Do(b, offset)
+    err = r.server.Do(r.buf[:offset+msgLen], offset)
 
     return
 }

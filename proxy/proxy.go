@@ -98,7 +98,12 @@ func (p *Server) Do(msg []byte, offset int) error {
     // our data.
     otherChan.Mutex.Lock()
     if !otherChan.IsClosed {
-        otherChan.Channel <- msg
+        // Ensure that a safe buffer is used... This gave me a great deal of
+        // headache, since I was passing the cached buffer through a channel
+        // (in a proxy).
+        b := make([]byte, len(msg))
+        copy(b, msg)
+        otherChan.Channel <- b
     }
     otherChan.Mutex.Unlock()
 
