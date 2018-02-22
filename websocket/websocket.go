@@ -224,7 +224,9 @@ func (ctx *Context) serve(conn net.Conn, cerr chan error) {
         return
     }
     err = r.Run()
-    if err != nil {
+    if cause := errors.Cause(err); err != nil &&
+        cause.Error() != connectionClosed.Error() {
+
         sendError(cerr, err)
     }
 
