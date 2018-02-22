@@ -8,7 +8,8 @@ import (
     "fmt"
     "github.com/pkg/errors"
     "github.com/SirGFM/GoWebSocketProxy/websocket"
-    "github.com/SirGFM/GoWebSocketProxy/proxy"
+    //"github.com/SirGFM/GoWebSocketProxy/proxy"
+    "github.com/SirGFM/GoWebSocketProxy/echo"
     "io/ioutil"
     "os"
     "os/signal"
@@ -64,7 +65,7 @@ func main() {
     signal.Notify(signalTrap, os.Interrupt)
 
     // Start the server
-    err := ctx.Setup(&proxy.Server{})
+    err := ctx.Setup(echo.GetTemplate())
     if err != nil {
         panic(err.Error())
     }

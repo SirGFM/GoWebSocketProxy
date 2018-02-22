@@ -1,6 +1,7 @@
 package websocket
 
 import (
+    "encoding/binary"
     "github.com/pkg/errors"
     "io"
     "net"
@@ -22,6 +23,8 @@ type runner struct {
     running *bool
     // Buffer used to receive messages from the connection.
     buf []byte
+    // Buffer used to avoid alloc'ing more memory when wrapping messages.
+    wrapBuf []byte
     // Time to send the next heart beat.
     heartBeatTime time.Time
     // Timeout for receiving messages.
@@ -31,18 +34,21 @@ type runner struct {
     closed bool
 }
 
+// Retrieves a new runner (useless, I know...).
+func getNewRunner() (r *runner) {
+    return &runner{}
+}
+
 // Setup a new runner that communicates with conn. When running is set to false
 // (and after timeouts), the runner stops, as the caller should close the
 // channel.
-func setupRunner(conn net.Conn, running *bool, server Server,
-    timeout time.Duration) (r *runner, err error) {
+func (r *runner) setupRunner(conn net.Conn, running *bool, server Server,
+    timeout time.Duration) (err error) {
 
-    r = &runner {
-        server:  server,
-        conn:    conn,
-        running: running,
-        timeout: timeout,
-    }
+    r.server = server
+    r.conn = conn
+    r.running = running
+    r.timeout = timeout
     r.buf = make([]byte, MinHeaderLength)
 
     return
@@ -109,6 +115,7 @@ func (r *runner) processMessage() (err error) {
             // and close the connection more easily, send the response and
             // return connectionClosed.
             r.conn.Write(r.buf[:offset+msgLen])
+            r.closed = true
         }
         // The end-point replied to our 'ConnectionClose'. Simply exit.
         return connectionClosed
@@ -189,4 +196,72 @@ func (r *runner) Run() (err error) {
 
     err = nil
     return
+}
+
+
+// =============================================================================
+//   Funcions exported through 'ClientConnection'
+// =============================================================================
+
+// Send buf through the web-socket, wrapping it into a WebSocket frame and
+// as text data. Use 'Send' if you need to specify the type.
+func (r *runner) Write(buf []byte) (n int, err error) {
+    err = r.Send(buf, TextFrame)
+    if err == nil {
+        n = len(buf)
+    }
+    return
+}
+
+// Send buf through the web-socket, wrapping it into a WebSocket frame and
+// as the specified type.
+func (r *runner) Send(buf []byte, dataType Opcode) (error) {
+    r.wrapBuf = WrapFrame(dataType, buf, r.wrapBuf)
+    return r.SendRaw(r.wrapBuf)
+}
+
+// Send data throught the WebSocket as-is. Shouldn't be used unless you know
+// what you are doing!
+func (r *runner) SendRaw(buf []byte) (retErr error) {
+    if r == nil || r.conn == nil {
+        return errors.New("websocket: invalid ClientConnection")
+    } else if r.closed {
+        // Refrain from sending data if closed
+        return errors.New(connectionClosed.Error())
+    }
+
+    // TODO Retry a few times if the entire message wasn't sent?
+    n, err := r.conn.Write(buf)
+    if err != nil {
+        retErr = errors.Wrap(err, "websocket: Failed to send the message")
+    } else if n != len(buf) {
+        retErr = errors.New("websocket: Failed to send the entire message")
+    }
+
+    return
+}
+
+// Requests to close the connection with the client.
+func (r *runner) Close(code CloseReason, reason []byte) error {
+    if r.closed {
+        // No need to do anything else if already closed.
+        return nil
+    }
+
+    encodedCode := make([]byte, 2)
+    binary.BigEndian.PutUint16(encodedCode, uint16(code))
+
+    payload := append(encodedCode, reason...)
+    err := r.Send(payload, ConnectionClose)
+    if err == nil {
+        r.closed = true
+    }
+
+    return err
+}
+
+// Release cached memory. Should be used for long-living connections that
+// occasionally sends really big messages.
+func (r *runner) Flush() {
+    r.wrapBuf = nil
 }

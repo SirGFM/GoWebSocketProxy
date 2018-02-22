@@ -57,5 +57,18 @@ const (
     // 0xB...0xF: reserved for further control frames
 )
 
+type CloseReason uint16
+const (
+    NormalClosure       CloseReason = 1000
+    GoingAway           CloseReason = 1001
+    ProtocolError       CloseReason = 1002
+    InvalidDataType     CloseReason = 1003
+    InconsistentContent CloseReason = 1007
+    InvalidMessage      CloseReason = 1008
+    MessageTooBig       CloseReason = 1009
+    MissingExtension    CloseReason = 1010
+    UnexpectedError     CloseReason = 1011
+)
+
 // Default message to be used for heart-beats.
 var HeartBeatMessage = []byte{0x80 | byte(Pong), 0x00}
