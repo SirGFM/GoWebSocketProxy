@@ -4,7 +4,6 @@ import (
     "github.com/pkg/errors"
     "github.com/SirGFM/GoWebSocketProxy/websocket"
     "sync"
-    "net"
 )
 
 // Synchronizes access to chanA and chanB
@@ -22,9 +21,9 @@ type closeableChannel struct {
 }
 
 // The proxy server
-type Server struct{
+type server struct{
     // Connection to the end-point.
-    conn net.Conn
+    conn websocket.ClientConnection
     // Channel connected to another server (from which that server sends
     // messages)
     recv *closeableChannel
@@ -32,8 +31,14 @@ type Server struct{
     stop chan struct{}
 }
 
+// Retrieves the template for the proxy server
+func GetTemplate() websocket.Server {
+    return &server{}
+}
+
+
 // Redirects messages received by another proxy server
-func (p *Server) redirect() {
+func (p *server) redirect() {
     for {
         select {
         case <-p.stop:
@@ -41,14 +46,14 @@ func (p *Server) redirect() {
             return
         case data := <-p.recv.Channel:
             // Received data from the other server: redirect to this' end-point
-            p.conn.Write(data)
+            p.conn.SendRaw(data)
         }
     }
 }
 
 // Creates a new server with a global reference (so other servers may redirect
 // message to it, and vice-versa).
-func (*Server) Clone(conn net.Conn) (websocket.Server, error) {
+func (*server) Clone(conn websocket.ClientConnection) (websocket.Server, error) {
     _chanMutex.Lock()
     defer _chanMutex.Unlock()
 
@@ -57,7 +62,7 @@ func (*Server) Clone(conn net.Conn) (websocket.Server, error) {
         return nil, errors.New("proxy: No available channel")
     }
 
-    p := &Server{
+    p := &server{
         conn: conn,
     }
     p.stop = make(chan struct{})
@@ -78,7 +83,7 @@ func (*Server) Clone(conn net.Conn) (websocket.Server, error) {
 }
 
 // Redirect the received message to any other listening server.
-func (p *Server) Do(msg []byte, offset int) error {
+func (p *server) Do(msg []byte, offset int) error {
     var otherChan *closeableChannel
 
     // Retrieve the global channel owned by another server
@@ -111,7 +116,7 @@ func (p *Server) Do(msg []byte, offset int) error {
 }
 
 // Makes this server stop running and clears its global reference.
-func (p *Server) Cleanup() {
+func (p *server) Cleanup() {
     // Signal the server to stop
     p.stop <- struct{}{}
 

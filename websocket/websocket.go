@@ -8,9 +8,30 @@ import (
     "sync"
 )
 
+// Ugly (and probably non-convetional) interface that exports the only public
+// functions of connections to clients.
+// None of these are thread-safe. However, since they should only be called from
+// the goroutine handling the client's connection, this shouldn't be an issue...
+type ClientConnection interface {
+    // Send buf through the web-socket, wrapping it into a WebSocket frame and
+    // as text data. Use 'Send' if you need to specify the type.
+    Write(buf []byte) (int, error)
+    // Send buf through the web-socket, wrapping it into a WebSocket frame and
+    // as the specified type.
+    Send(buf []byte, dataType Opcode) (error)
+    // Send data throught the WebSocket as-is. Shouldn't be used unless you know
+    // what you are doing!
+    SendRaw(buf []byte) error
+    // Requests to close the connection with the client.
+    Close(code CloseReason, reason []byte) error
+    // Release cached memory. Should be used for long-living connections that
+    // occasionally sends really big messages.
+    Flush()
+}
+
 type Server interface {
     // Returns a new instance of this server, passed to the runner.
-    Clone(conn net.Conn) (Server, error)
+    Clone(conn ClientConnection) (Server, error)
     // Do something with the received message. Offset points to the actual
     // payload within the WebSocket frame.
     Do(msg []byte, offset int) error
@@ -189,20 +210,23 @@ func (ctx *Context) serve(conn net.Conn, cerr chan error) {
     } (ctx)
 
     // Clone the server (if needed)
-    server, err := ctx.serverTempl.Clone(conn)
+    r := getNewRunner()
+    server, err := ctx.serverTempl.Clone(r)
     if err != nil {
         sendError(cerr, err)
         return
     }
 
     // Runs until any error happens
-    r, err := setupRunner(conn, &ctx.running, server, defaultTimeout)
+    err = r.setupRunner(conn, &ctx.running, server, defaultTimeout)
     if err != nil {
         sendError(cerr, err)
         return
     }
     err = r.Run()
-    if err != nil {
+    if cause := errors.Cause(err); err != nil &&
+        cause.Error() != connectionClosed.Error() {
+
         sendError(cerr, err)
     }
 
