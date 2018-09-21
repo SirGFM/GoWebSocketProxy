@@ -111,6 +111,7 @@ func (r *runner) processMessage() (err error) {
         // received, the end-point must reply as soon as possible with its
         // own 'ConnectionClose'.
         if !r.closed {
+            r.conn.SetWriteDeadline(time.Now().Add(r.timeout))
             // The end-point started the closing procedure. In order to reply
             // and close the connection more easily, send the response and
             // return connectionClosed.
@@ -120,6 +121,8 @@ func (r *runner) processMessage() (err error) {
         // The end-point replied to our 'ConnectionClose'. Simply exit.
         return connectionClosed
     case Ping:
+        r.conn.SetWriteDeadline(time.Now().Add(r.timeout))
+
         // 5.5.2 and 5.5.3 of RFC 6455 defines that a Ping request must be
         // answered with a Pong response. If it contained any
         // 'Payload Data', the same data must be sent on the response.
@@ -230,6 +233,7 @@ func (r *runner) SendRaw(buf []byte) (retErr error) {
         return errors.New(connectionClosed.Error())
     }
 
+    r.conn.SetWriteDeadline(time.Now().Add(r.timeout))
     // TODO Retry a few times if the entire message wasn't sent?
     n, err := r.conn.Write(buf)
     if err != nil {
